@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<!-- saved from url=(0012)about:srcdoc -->
+<html lang="ar" dir="rtl"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            callbacksMap.set(id, { resolve, reject });
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(new Response(event.data.body, {
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              }));
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Life City - سيرفر الحياة الواقعية الأفضل</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            background: rgba(15, 15, 35, 0.95);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+            padding: 1rem 0;
+            border-bottom: 2px solid #ff6b35;
+        }
+
+        .nav-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 2rem;
+        }
+
+        .logo {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(45deg, #8b5cf6, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(139, 92, 246, 0.5);
+        }
+
+        .nav-menu {
+            display: flex;
+            list-style: none;
+            gap: 2rem;
+        }
+
+        .nav-item a {
+            color: #ffffff;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 25px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .nav-item a:hover {
+            background: linear-gradient(45deg, #8b5cf6, #a855f7);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(139, 92, 246, 0.4);
+        }
+
+        /* Hero Section */
+        .hero {
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: 
+                linear-gradient(rgba(15, 15, 35, 0.7), rgba(15, 15, 35, 0.7)),
+                url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><rect fill="%23000" width="1200" height="800"/><g fill="none" stroke="%23ff6b35" stroke-width="1"><circle cx="600" cy="400" r="300" opacity="0.1"/><circle cx="300" cy="200" r="150" opacity="0.05"/><circle cx="900" cy="600" r="200" opacity="0.05"/></g></svg>');
+            background-size: cover;
+            background-position: center;
+            text-align: center;
+            position: relative;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 50% 50%, rgba(255, 107, 53, 0.1) 0%, transparent 70%);
+        }
+
+        .hero-content {
+            max-width: 800px;
+            z-index: 2;
+            position: relative;
+        }
+
+        .hero h1 {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(45deg, #8b5cf6, #a855f7, #ffffff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 30px rgba(139, 92, 246, 0.5);
+            animation: glow 3s ease-in-out infinite alternate;
+        }
+
+        @keyframes glow {
+            from { filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.5)); }
+            to { filter: drop-shadow(0 0 20px rgba(139, 92, 246, 0.8)); }
+        }
+
+        .hero p {
+            font-size: 1.5rem;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-primary {
+            background: linear-gradient(45deg, #8b5cf6, #a855f7);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: white;
+            border: 2px solid #8b5cf6;
+        }
+
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(139, 92, 246, 0.4);
+        }
+
+        /* Stats Section */
+        .stats {
+            padding: 4rem 2rem;
+            background: rgba(26, 26, 46, 0.8);
+        }
+
+        .stats-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.1), rgba(247, 147, 30, 0.1));
+            padding: 2rem;
+            border-radius: 15px;
+            text-align: center;
+            border: 1px solid rgba(255, 107, 53, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(255, 107, 53, 0.2);
+        }
+
+        .stat-number {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #ff6b35;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            font-size: 1.2rem;
+            opacity: 0.8;
+        }
+
+        /* Features Section */
+        .features {
+            padding: 4rem 2rem;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 3rem;
+            margin-bottom: 3rem;
+            background: linear-gradient(45deg, #8b5cf6, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .features-grid {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .feature-card {
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+            padding: 2rem;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 107, 53, 0.2);
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 20px 40px rgba(255, 107, 53, 0.3);
+            border-color: rgba(255, 107, 53, 0.5);
+        }
+
+        .feature-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #ff6b35;
+        }
+
+        .feature-title {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: #ffffff;
+        }
+
+        .feature-description {
+            opacity: 0.8;
+            line-height: 1.6;
+        }
+
+        /* Jobs Section */
+        .jobs {
+            padding: 4rem 2rem;
+            background: rgba(22, 33, 62, 0.8);
+        }
+
+        .jobs-grid {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+        }
+
+        .job-card {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.15), rgba(247, 147, 30, 0.15));
+            padding: 1.5rem;
+            border-radius: 15px;
+            text-align: center;
+            border: 1px solid rgba(255, 107, 53, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .job-card:hover {
+            transform: scale(1.05);
+            box-shadow: 0 15px 30px rgba(255, 107, 53, 0.2);
+        }
+
+        .job-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: #f7931e;
+        }
+
+        /* Rules Section */
+        .rules {
+            padding: 4rem 2rem;
+        }
+
+        .rules-container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .rule-item {
+            background: rgba(255, 255, 255, 0.1);
+            margin-bottom: 1rem;
+            padding: 1.5rem;
+            border-radius: 10px;
+            border-right: 4px solid #ff6b35;
+            transition: all 0.3s ease;
+        }
+
+        .rule-item:hover {
+            background: rgba(255, 107, 53, 0.1);
+            transform: translateX(10px);
+        }
+
+        /* Discord Section */
+        .discord {
+            padding: 4rem 2rem;
+            background: linear-gradient(135deg, #7289da, #5865f2);
+            text-align: center;
+        }
+
+        .discord-content {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .discord h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .discord-btn {
+            background: #ffffff;
+            color: #5865f2;
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: bold;
+            display: inline-block;
+            margin-top: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .discord-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Footer */
+        .footer {
+            background: #0f0f23;
+            padding: 3rem 2rem 1rem;
+            border-top: 2px solid #ff6b35;
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .footer-section h3 {
+            color: #ff6b35;
+            margin-bottom: 1rem;
+        }
+
+        .footer-section ul {
+            list-style: none;
+        }
+
+        .footer-section ul li {
+            margin-bottom: 0.5rem;
+        }
+
+        .footer-section ul li a {
+            color: #ffffff;
+            text-decoration: none;
+            opacity: 0.8;
+            transition: opacity 0.3s ease;
+        }
+
+        .footer-section ul li a:hover {
+            opacity: 1;
+            color: #ff6b35;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            padding-top: 2rem;
+            border-top: 1px solid rgba(255, 107, 53, 0.3);
+            opacity: 0.6;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-menu {
+                display: none;
+            }
+            
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+            
+            .hero p {
+                font-size: 1.2rem;
+            }
+            
+            .cta-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+
+        /* Animations */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(30px);
+            animation: fadeInUp 1s ease forwards;
+        }
+
+        @keyframes fadeInUp {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Particle Animation */
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .particle {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: #ff6b35;
+            border-radius: 50%;
+            animation: float 6s infinite linear;
+        }
+
+        @keyframes float {
+            0% {
+                opacity: 0;
+                transform: translateY(100vh) scale(0);
+            }
+            10% {
+                opacity: 1;
+            }
+            90% {
+                opacity: 1;
+            }
+            100% {
+                opacity: 0;
+                transform: translateY(-100vh) scale(1);
+            }
+        }
+    </style>
+</head>
+<body id="artifacts-component-root-html">
+    <!-- Particles Background -->
+    <div class="particles" id="particles"><div class="particle" style="left: 21.3078%; animation-duration: 2.08225s; animation-delay: 0.50294s;"></div><div class="particle" style="left: 54.2669%; animation-duration: 2.94053s; animation-delay: 0.499027s;"></div><div class="particle" style="left: 86.5168%; animation-duration: 3.09869s; animation-delay: 0.584514s;"></div><div class="particle" style="left: 73.529%; animation-duration: 2.40284s; animation-delay: 1.52943s;"></div><div class="particle" style="left: 25.9349%; animation-duration: 2.17223s; animation-delay: 0.620205s;"></div><div class="particle" style="left: 79.7313%; animation-duration: 2.02888s; animation-delay: 0.974882s;"></div><div class="particle" style="left: 22.45%; animation-duration: 2.94937s; animation-delay: 0.458306s;"></div><div class="particle" style="left: 57.8813%; animation-duration: 4.46308s; animation-delay: 0.785438s;"></div><div class="particle" style="left: 25.7317%; animation-duration: 3.82897s; animation-delay: 1.12165s;"></div><div class="particle" style="left: 46.5778%; animation-duration: 3.36361s; animation-delay: 1.31924s;"></div><div class="particle" style="left: 54.3746%; animation-duration: 3.3784s; animation-delay: 0.709798s;"></div><div class="particle" style="left: 95.5515%; animation-duration: 4.58898s; animation-delay: 1.94535s;"></div><div class="particle" style="left: 60.0665%; animation-duration: 3.96149s; animation-delay: 1.6236s;"></div><div class="particle" style="left: 95.794%; animation-duration: 4.34324s; animation-delay: 0.0311015s;"></div><div class="particle" style="left: 5.51293%; animation-duration: 3.65001s; animation-delay: 0.563304s;"></div><div class="particle" style="left: 90.2546%; animation-duration: 2.05372s; animation-delay: 1.58657s;"></div><div class="particle" style="left: 87.9808%; animation-duration: 4.85746s; animation-delay: 1.4584s;"></div><div class="particle" style="left: 63.7301%; animation-duration: 4.36744s; animation-delay: 1.15364s;"></div><div class="particle" style="left: 29.8157%; animation-duration: 3.15227s; animation-delay: 1.56192s;"></div><div class="particle" style="left: 29.6573%; animation-duration: 2.46149s; animation-delay: 1.40214s;"></div><div class="particle" style="left: 28.9168%; animation-duration: 3.19212s; animation-delay: 0.722669s;"></div><div class="particle" style="left: 86.6618%; animation-duration: 3.3563s; animation-delay: 1.08672s;"></div><div class="particle" style="left: 8.04443%; animation-duration: 4.40418s; animation-delay: 0.601927s;"></div><div class="particle" style="left: 86.3818%; animation-duration: 3.60835s; animation-delay: 1.60879s;"></div><div class="particle" style="left: 75.5506%; animation-duration: 3.5596s; animation-delay: 0.495452s;"></div><div class="particle" style="left: 98.3675%; animation-duration: 2.55806s; animation-delay: 0.0921235s;"></div><div class="particle" style="left: 56.0838%; animation-duration: 4.91757s; animation-delay: 1.64015s;"></div><div class="particle" style="left: 56.8266%; animation-duration: 2.33656s; animation-delay: 0.150883s;"></div><div class="particle" style="left: 90.6407%; animation-duration: 4.96403s; animation-delay: 1.11513s;"></div><div class="particle" style="left: 71.7256%; animation-duration: 3.31322s; animation-delay: 1.18751s;"></div><div class="particle" style="left: 12.897%; animation-duration: 2.14014s; animation-delay: 0.0205136s;"></div><div class="particle" style="left: 65.0586%; animation-duration: 4.18222s; animation-delay: 0.578s;"></div><div class="particle" style="left: 90.3587%; animation-duration: 4.65226s; animation-delay: 1.64822s;"></div><div class="particle" style="left: 91.123%; animation-duration: 3.07606s; animation-delay: 0.406354s;"></div><div class="particle" style="left: 14.0435%; animation-duration: 3.41588s; animation-delay: 0.114565s;"></div><div class="particle" style="left: 42.3945%; animation-duration: 4.71345s; animation-delay: 0.496529s;"></div><div class="particle" style="left: 83.5078%; animation-duration: 3.73098s; animation-delay: 0.674298s;"></div><div class="particle" style="left: 46.6843%; animation-duration: 2.0829s; animation-delay: 1.75943s;"></div><div class="particle" style="left: 86.4588%; animation-duration: 2.36777s; animation-delay: 0.706094s;"></div><div class="particle" style="left: 82.5565%; animation-duration: 3.54578s; animation-delay: 1.78148s;"></div><div class="particle" style="left: 44.2199%; animation-duration: 3.46806s; animation-delay: 0.561211s;"></div><div class="particle" style="left: 28.1022%; animation-duration: 3.66817s; animation-delay: 1.04489s;"></div><div class="particle" style="left: 68.9594%; animation-duration: 3.4543s; animation-delay: 0.331795s;"></div><div class="particle" style="left: 98.3977%; animation-duration: 3.00977s; animation-delay: 1.3125s;"></div><div class="particle" style="left: 30.141%; animation-duration: 2.47751s; animation-delay: 0.655947s;"></div><div class="particle" style="left: 59.9301%; animation-duration: 3.86424s; animation-delay: 0.231624s;"></div><div class="particle" style="left: 52.2873%; animation-duration: 3.42677s; animation-delay: 0.0944886s;"></div><div class="particle" style="left: 29.394%; animation-duration: 2.21365s; animation-delay: 1.95633s;"></div><div class="particle" style="left: 25.7938%; animation-duration: 2.72211s; animation-delay: 1.0025s;"></div><div class="particle" style="left: 29.8945%; animation-duration: 3.47402s; animation-delay: 1.66693s;"></div></div>
+
+    <!-- Header -->
+    <header class="header">
+        <nav class="nav-container">
+            <div class="logo">🏙️ Life City RP</div>
+            <ul class="nav-menu">
+                <li class="nav-item"><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#home">الرئيسية</a></li>
+                <li class="nav-item"><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#features">المميزات</a></li>
+                <li class="nav-item"><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#jobs">الوظائف</a></li>
+                <li class="nav-item"><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#rules">القوانين</a></li>
+                <li class="nav-item"><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#discord">ديسكورد</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <!-- Hero Section -->
+    <section id="home" class="hero">
+        <div class="hero-content">
+            <h1>مرحباً بك في Life City</h1>
+            <p>أفضل سيرفر الحياة الواقعية في Roblox</p>
+            <div class="cta-buttons">
+                <a href="https://www.claudeusercontent.com/?errorReportingMode=parent#" class="btn btn-primary">ابدأ اللعب الآن</a>
+                <a href="https://www.claudeusercontent.com/?errorReportingMode=parent#features" class="btn btn-secondary">تعرف على المزيد</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="stats">
+        <div class="stats-container">
+            <div class="stat-card fade-in">
+                <div class="stat-number">1000+</div>
+                <div class="stat-label">لاعب نشط</div>
+            </div>
+            <div class="stat-card fade-in">
+                <div class="stat-number">24/7</div>
+                <div class="stat-label">متاح دائماً</div>
+            </div>
+            <div class="stat-card fade-in">
+                <div class="stat-number">50+</div>
+                <div class="stat-label">وظيفة متنوعة</div>
+            </div>
+            <div class="stat-card fade-in">
+                <div class="stat-number">5★</div>
+                <div class="stat-label">تقييم ممتاز</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="features">
+        <h2 class="section-title">مميزات السيرفر</h2>
+        <div class="features-grid">
+            <div class="feature-card fade-in">
+                <div class="feature-icon">🏙️</div>
+                <h3 class="feature-title">مدينة حقيقية</h3>
+                <p class="feature-description">مدينة مفصلة بالكامل في Roblox مع مباني حقيقية وأماكن تفاعلية للاستكشاف</p>
+            </div>
+            <div class="feature-card fade-in">
+                <div class="feature-icon">💼</div>
+                <h3 class="feature-title">وظائف متنوعة</h3>
+                <p class="feature-description">أكثر من 50 وظيفة مختلفة من الطبيب إلى رجل الأعمال إلى المجرم</p>
+            </div>
+            <div class="feature-card fade-in">
+                <div class="feature-icon">🚗</div>
+                <h3 class="feature-title">سيارات حصرية</h3>
+                <p class="feature-description">مجموعة ضخمة من السيارات والمركبات المتنوعة في Roblox</p>
+            </div>
+            <div class="feature-card fade-in">
+                <div class="feature-icon">🏠</div>
+                <h3 class="feature-title">عقارات للبيع</h3>
+                <p class="feature-description">اشترِ منزلك الخاص أو شقة أو حتى فيلا فاخرة في أفضل الأحياء</p>
+            </div>
+            <div class="feature-card fade-in">
+                <div class="feature-icon">👮‍♂️</div>
+                <h3 class="feature-title">نظام شرطة متطور</h3>
+                <p class="feature-description">نظام شرطة واقعي مع دوريات وتحقيقات وقضايا جنائية</p>
+            </div>
+            <div class="feature-card fade-in">
+                <div class="feature-icon">🎭</div>
+                <h3 class="feature-title">أحداث مستمرة</h3>
+                <p class="feature-description">فعاليات وأحداث يومية تجعل التجربة مثيرة ومتجددة</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Jobs Section -->
+    <section id="jobs" class="jobs">
+        <h2 class="section-title">الوظائف المتاحة</h2>
+        <div class="jobs-grid">
+            <div class="job-card fade-in">
+                <div class="job-icon">👮‍♂️</div>
+                <h3>شرطي</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">🚑</div>
+                <h3>طبيب</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">👨‍💼</div>
+                <h3>رجل أعمال</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">🚖</div>
+                <h3>سائق تاكسي</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">🔧</div>
+                <h3>ميكانيكي</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">🏪</div>
+                <h3>صاحب متجر</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">📺</div>
+                <h3>صحفي</h3>
+            </div>
+            <div class="job-card fade-in">
+                <div class="job-icon">💰</div>
+                <h3>محاسب</h3>
+            </div>
+        </div>
+    </section>
+
+    <!-- Rules Section -->
+    <section id="rules" class="rules">
+        <h2 class="section-title">قوانين السيرفر</h2>
+        <div class="rules-container">
+            <div class="rule-item fade-in">
+                <h3>🚫 عدم التخريب</h3>
+                <p>ممنوع التخريب أو إفساد تجربة اللاعبين الآخرين</p>
+            </div>
+            <div class="rule-item fade-in">
+                <h3>🎭 اللعب بالشخصية</h3>
+                <p>يجب الالتزام بشخصيتك والتصرف بواقعية</p>
+            </div>
+            <div class="rule-item fade-in">
+                <h3>💬 الاحترام المتبادل</h3>
+                <p>احترم جميع اللاعبين وتجنب السب والشتم</p>
+            </div>
+            <div class="rule-item fade-in">
+                <h3>🚗 القيادة الآمنة</h3>
+                <p>قد بحذر واتبع قوانين المرور</p>
+            </div>
+            <div class="rule-item fade-in">
+                <h3>⚖️ العدالة</h3>
+                <p>لا تستغل الأخطاء أو تستخدم الغش</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Discord Section -->
+    <section id="discord" class="discord">
+        <div class="discord-content">
+            <h2>انضم إلى مجتمعنا</h2>
+            <p>تواصل مع اللاعبين الآخرين واحصل على آخر الأخبار والتحديثات</p>
+            <a href="https://discord.gg/li-1" class="discord-btn">انضم إلى Discord</a>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3>Life City</h3>
+                <p>أفضل سيرفر الحياة الواقعية في Roblox. انضم إلينا وعش تجربة لا تُنسى.</p>
+            </div>
+            <div class="footer-section">
+                <h3>روابط سريعة</h3>
+                <ul>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#home">الرئيسية</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#features">المميزات</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#jobs">الوظائف</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#rules">القوانين</a></li>
+                </ul>
+            </div>
+            <div class="footer-section">
+                <h3>تواصل معنا</h3>
+                <ul>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#">Discord</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#">تويتر</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#">يوتيوب</a></li>
+                    <li><a href="https://www.claudeusercontent.com/?errorReportingMode=parent#">انستقرام</a></li>
+                </ul>
+            </div>
+            <div class="footer-section">
+                <h3>معلومات السيرفر</h3>
+                <ul>
+                    <li>IP: 127.0.0.1:30120</li>
+                    <li>اللاعبين: 128/128</li>
+                    <li>الحالة: متصل</li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>© 2025 Life City. جميع الحقوق محفوظة.</p>
+        </div>
+    </footer>
+
+    <script>
+        // Smooth scrolling
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+
+        // Particles animation
+        function createParticles() {
+            const particlesContainer = document.getElementById('particles');
+            
+            for (let i = 0; i < 50; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.animationDuration = (Math.random() * 3 + 2) + 's';
+                particle.style.animationDelay = Math.random() * 2 + 's';
+                particlesContainer.appendChild(particle);
+            }
+        }
+
+        // Fade in animation on scroll
+        function handleScrollAnimations() {
+            const elements = document.querySelectorAll('.fade-in');
+            elements.forEach(element => {
+                const elementTop = element.getBoundingClientRect().top;
+                const elementVisible = 150;
+                
+                if (elementTop < window.innerHeight - elementVisible) {
+                    element.style.opacity = '1';
+                    element.style.transform = 'translateY(0)';
+                }
+            });
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            createParticles();
+            handleScrollAnimations();
+            
+            // Update stats with animation
+            const statNumbers = document.querySelectorAll('.stat-number');
+            statNumbers.forEach(stat => {
+                const finalNumber = stat.textContent;
+                const isPlus = finalNumber.includes('+');
+                const isStar = finalNumber.includes('★');
+                const isSlash = finalNumber.includes('/');
+                
+                if (!isPlus && !isStar && !isSlash) {
+                    let currentNumber = 0;
+                    const increment = parseInt(finalNumber) / 100;
+                    const timer = setInterval(() => {
+                        currentNumber += increment;
+                        if (currentNumber >= parseInt(finalNumber)) {
+                            stat.textContent = finalNumber;
+                            clearInterval(timer);
+                        } else {
+                            stat.textContent = Math.floor(currentNumber);
+                        }
+                    }, 20);
+                }
+            });
+        });
+
+        window.addEventListener('scroll', handleScrollAnimations);
+
+        // Header scroll effect
+        window.addEventListener('scroll', function() {
+            const header = document.querySelector('.header');
+            if (window.scrollY > 100) {
+                header.style.background = 'rgba(15, 15, 35, 0.98)';
+            } else {
+                header.style.background = 'rgba(15, 15, 35, 0.95)';
+            }
+        });
+    </script>
+
+</body></html>
